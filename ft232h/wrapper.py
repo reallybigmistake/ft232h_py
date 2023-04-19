@@ -1,19 +1,27 @@
 # coding=utf-8
 from ctypes import *
 from ft232.dll_h import *
-import time
 import logging
 
 
 class FT232:
-
-    def __init__(self, description):
-        self.description = description
+    def __init__(self):
         self.ft232 = windll.LoadLibrary('ftd2xx.dll')
         self.handle = None
 
-    def open(self):
-        self.FT_OpenEx_ByDesc(self.description)
+    # description:str, serialnum:str, location:int
+    def open(self, description=None, serialnum=None, location=None):
+        self.description = description
+        self.serialnum = serialnum
+        self.location = location
+        if self.description:
+            self.FT_OpenEx_ByDesc(self.description.encode())
+        elif self.serialnum:
+            self.FT_OpenEx_BySerialNum(self.serialnum.encode())
+        elif self.location:
+            self.FT_OpenEx_ByLocation(self.location)
+        else:
+            self.FT_Open(0)
         if not self.status:
             logging.debug('device %s open successfully' % (self.description))
         else:
@@ -56,10 +64,22 @@ class FT232:
     def FT_Close(self):
         self.status = self.ft232.FT_Close(self.handle)
 
+    def FT_OpenEx_ByLocation(self, location):
+        handle = FT_HANDLE()
+        self.status = self.ft232.FT_OpenEx(
+            location, FT_OPEN_BY_LOCATION, byref(handle))
+        self.handle = handle
+
     def FT_OpenEx_ByDesc(self, Desc):
         handle = FT_HANDLE()
         self.status = self.ft232.FT_OpenEx(
             Desc, FT_OPEN_BY_DESCRIPTION, byref(handle))
+        self.handle = handle
+
+    def FT_OpenEx_BySerialNum(self, serialNum):
+        handle = FT_HANDLE()
+        self.status = self.ft232.FT_OpenEx(
+            serialNum, FT_OPEN_BY_SERIAL_NUMBER, byref(handle))
         self.handle = handle
 
     def FT_SetBaudRate(self, speed):
@@ -83,17 +103,6 @@ class FT232:
         self.status = self.ft232.FT_GetComPortNumber(
             self.handle, byref(ComPortNumber))
         return ComPortNumber.value
-
-    def echostruct(self, tar):
-        for name, value in tar._fields_:
-            if name == 'ftHandle':
-                if getattr(tar, name):
-                    print(name, hex(getattr(tar, name)), end=';')
-                else:
-                    print(name, getattr(tar, name), end=';')
-            else:
-                print(name, getattr(tar, name), end=';')
-        print()
 
     def FT_GetDeviceInfo(self):
         fttype = c_int()
@@ -180,6 +189,50 @@ class FT232:
     def check_status(self, msg=''):
         if self.status:
             logging.warning(str(msg) + str(STATUS(self.status)))
+            return False
+        return True
+
+    def status_is_ok(self):
+        if self.handle is None:
+            return False
+        self.FT_GetStatus()
+        return self.check_status()
+
+    def echostruct(self, tar):
+        # tar: FT_DEVICE_LIST_INFO_NODE s
+        for name, value in tar._fields_:
+            if name == 'ftHandle':
+                if getattr(tar, name):
+                    print(name, hex(getattr(tar, name)), end=';')
+                else:
+                    print(name, getattr(tar, name), end=';')
+            else:
+                print(name, getattr(tar, name), end=';')
+        print()
+
+    def get_devinfos(self):
+        devnums = self.FT_CreateDeviceInfoList().value
+        infos = []
+        num = c_int()
+        nodes = (FT_DEVICE_LIST_INFO_NODE * devnums)()
+        pDest = nodes
+        self.status = self.ft232. FT_GetDeviceInfoList(
+            pDest, byref(num))
+        for i in range(num.value):
+            info = {}
+            for name, value in pDest[i]._fields_:
+                info[name] = getattr(pDest[i], name)
+            infos.append(info)
+        return infos
+
+    def get_ft_status(self, info):
+        return {
+            'isOpend': bool(info['Flags'] & 0x01),
+            'isHighSpeed': bool(info['Flags'] & 0x02)
+        }
+
+    def get_ft_name(self, info):
+        return FT_DEVICE(info['Type']).name
 
 
 if __name__ == '__main__':

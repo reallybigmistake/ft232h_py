@@ -5,9 +5,13 @@ import logging
 
 class I2C(MPSSE):
 
-    def __init__(self, description):
-        MPSSE.__init__(self, description)
-        self.config_to_mmse()
+    def __init__(self, **kwargs):
+        MPSSE.__init__(self)
+
+    def i2c_open(self, clock, **kwargs):
+        self.mpsse_open(**kwargs)
+        self.set_clock(clock)
+        self.i2c_config()
 
     def set_clock(self, clock):
         clock = clock * 3 / 2
@@ -31,7 +35,7 @@ class I2C(MPSSE):
         self.FT_Write(setclkcmd)
         self.check_status()
 
-    def i2c_config(self, clock):
+    def i2c_config(self):
         # set i2c clock phase
         self.FT_Write(bytes([MPSSE_CMD_ENABLE_3PHASE_CLOCKING]))
         # enable tristate
@@ -48,8 +52,6 @@ class I2C(MPSSE):
             DIRECTION_SCLOUT_SDAOUT,
         ])
         self.FT_Write(gpio_set)
-
-        self.set_clock(clock)
 
     def i2c_start(self, send=True):
         scl_high_sda_high = bytes([
@@ -262,7 +264,7 @@ class I2C(MPSSE):
         else:
             return read_8bits_cmd
 
-    def i2c_FastWrite(self, slave7bit, regaddr, bdata, burst=None):
+    def i2c_FastWrite_EEPROM(self, slave7bit, regaddr, bdata, burst=None):
         startcmd = self.i2c_start(send=False)
         stopcmd = self.i2c_stop(send=False)
         addresscmd = self.i2c_Write8bitsAndGetAck(
@@ -285,8 +287,6 @@ class I2C(MPSSE):
             # read acks
             self.mmpsse_read(len(onetime) + 2, 10)
             ackbytes = self.inbytes
-            # if any([i & 0x01 for i in ackbytes]):
-            # logging.warning('seem lose some ack')
             cnt = 0
             for i in ackbytes:
                 if i & 0x01:
@@ -297,43 +297,8 @@ class I2C(MPSSE):
 
             self.flushinbuff()
 
-    def i2c_FastWriteA10(self, slave10bit, bdata, burst=None):
-        startcmd = self.i2c_start(send=False)
-        stopcmd = self.i2c_stop(send=False)
-        # 11110xx + W
-        addresscmd0 = self.i2c_Write8bitsAndGetAck(
-            (0x78 + ((slave10bit >> 8) & 0x3)) << 1 | 0, send=False)
-        # last 8 bit
-        addresscmd1 = self.i2c_Write8bitsAndGetAck(
-            slave10bit & 0xff, send=False)
-        wrdatacmd = b''
-        datalen = len(bdata)
-        if not burst:
-            burst = datalen
-        while bdata:
-            onetime, bdata = bdata[:burst], bdata[burst:]
-            # makeup data cmd for one burst
-            for i in range(len(onetime)):
-                wrdatacmd += self.i2c_Write8bitsAndGetAck(
-                    onetime[i], send=False)
-
-            self.FT_Write(startcmd + addresscmd0 + addresscmd1 +
-                          wrdatacmd + stopcmd)
-            wrdatacmd = b''
-            # read acks
-            self.mmpsse_read(len(onetime) + 2, 10)
-            ackbytes = self.inbytes
-            cnt = 0
-            for i in ackbytes:
-                if i & 0x01:
-                    cnt += 1
-            if cnt > 0:
-                logging.warning('except %d acks, miss %d' %
-                                (len(ackbytes), cnt))
-
-            self.flushinbuff()
-
-    def i2c_FastWrite_Brite(self, slave7bit, bdata, burst=None):
+    def i2c_FastWrite(self, slave7bit, bdata, burst=None):
+        print(f'i2c write addr {slave7bit<<1:02x}, data {bdata.hex()}')
         startcmd = self.i2c_start(send=False)
         stopcmd = self.i2c_stop(send=False)
         addresscmd = self.i2c_Write8bitsAndGetAck(
@@ -352,7 +317,7 @@ class I2C(MPSSE):
             self.FT_Write(startcmd + addresscmd + wrdatacmd + stopcmd)
             wrdatacmd = b''
             # read acks
-            self.mmpsse_read(len(onetime) + 2, 10)
+            self.mmpsse_read(len(onetime) + 1, 10)
             ackbytes = self.inbytes
             # if any([i & 0x01 for i in ackbytes]):
             # logging.warning('seem lose some ack')
@@ -366,7 +331,7 @@ class I2C(MPSSE):
 
             self.flushinbuff()
 
-    def i2c_FastRead(self, slave7bit, regaddr, inlen, burst=None, timeout=10):
+    def i2c_FastRead_EEPROM(self, slave7bit, regaddr, inlen, burst=None, timeout=10):
         startcmd = self.i2c_start(send=False)
         stopcmd = self.i2c_stop(send=False)
         restcmd = self.i2c_restart(send=False)
@@ -403,53 +368,9 @@ class I2C(MPSSE):
             inbytes += self.inbytes
             inlen -= burst
             rddatacmd = b''
-        return inbytes[3:]  # 2 acks should be ignored
-    
-    def i2c_FastReadA10(self, slave10bit, inlen, burst=None, timeout=10):
-        # 10bit treat last 8bit address as register adress in 7bit????
-        startcmd = self.i2c_start(send=False)
-        stopcmd = self.i2c_stop(send=False)
-        restcmd = self.i2c_restart(send=False)
-        # 11110xx + W
-        addresscmd0 = self.i2c_Write8bitsAndGetAck(
-            (0x78 + ((slave10bit >> 8) & 0x3)) << 1 | 0, send=False)
-        # last 8 bit
-        addresscmd1 = self.i2c_Write8bitsAndGetAck(
-            slave10bit & 0xff, send=False)
-        # 11110xx + R
-        addresscmd2 = self.i2c_Write8bitsAndGetAck(
-            (0x78 + ((slave10bit >> 8) & 0x3)) << 1 | 1, send=False)
-        # slave data prepare may not ready when master read, so delay
-        rddelay = bytes([
-            MPSSE_CMD_SET_DATA_BITS_LOWBYTE,
-            VALUE_SCLLOW_SDAHIGH,
-            DIRECTION_SCLOUT_SDAOUT,
-        ])
-        inbytes = b''
-        rddatacmd = b''
-        if not burst:
-            burst = inlen
-        while inlen:
-            if inlen < burst:
-                burst = inlen
-            for i in range(burst):
-                # no ack after the last bytes
-                if i == burst - 1:
-                    t = self.i2c_Read8bitsAndGiveAck(ack=False, send=False)
-                else:
-                    t = self.i2c_Read8bitsAndGiveAck(send=False)
+        return inbytes[3:] #3 acks should be ignored
 
-                rddatacmd += t
-            # send read cmd
-            self.FT_Write(startcmd + addresscmd0 + addresscmd1 +
-                          restcmd + addresscmd2 + rddelay * SLAVE_PREPARE_DURATION + rddatacmd + stopcmd)
-            self.mmpsse_read(burst + 3, timeout)
-            inbytes += self.inbytes
-            inlen -= burst
-            rddatacmd = b''
-        return inbytes[3:]  # 2 acks should be ignored
-
-    def i2c_FastRead_brite(self, slave7bit, inlen, burst=None, timeout=10):
+    def i2c_FastRead(self, slave7bit, inlen, burst=None, timeout=10):
         startcmd = self.i2c_start(send=False)
         stopcmd = self.i2c_stop(send=False)
         addresscmd1 = self.i2c_Write8bitsAndGetAck(
@@ -478,8 +399,10 @@ class I2C(MPSSE):
             # send read cmd
             self.FT_Write(startcmd + addresscmd1 + rddelay *
                           SLAVE_PREPARE_DURATION + rddatacmd + stopcmd)
-            self.mmpsse_read(burst + 3, timeout)
+            self.mmpsse_read(burst + 1, timeout)
             inbytes += self.inbytes
             inlen -= burst
             rddatacmd = b''
-        return inbytes[1:]  # 2 acks should be ignored
+        print(f'i2c read bytes {inbytes[1:].hex()}')
+        return inbytes[1:] #1 acks should be ignored
+
